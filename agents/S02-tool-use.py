@@ -6,6 +6,8 @@ import json
 
 # 读取 .env 文件中的键值对，把它们加载到操作系统的环境变量（os.environ）中，以便后续代码通过 os.getenv() 能访问到这些配置
 from dotenv import load_dotenv
+# 允许开发者将文件路径作为对象进行处理，集成了路径解析、文件 I/O 及目录遍历等功能
+from pathlib import Path
 # 用于调用 Ollama (OpenAI 兼容接口) 的库
 from openai import OpenAI
 
@@ -16,6 +18,8 @@ load_dotenv()
 base_url = os.getenv("CHIANLINK_BASE_URL")
 api_key = os.getenv("CHIANLINK_API_KEY")
 MODEL = os.getenv("MODEL_NAME")
+WORKDIR = Path.cwd()
+SYSTEM = f"You are a coding agent at {WORKDIR}. Use bash to solve tasks. Act, don't explain."
 
 # 初始化客户端
 client = OpenAI(
@@ -23,8 +27,6 @@ client = OpenAI(
     api_key = api_key,
 )
 
-
-SYSTEM = f"You are a coding agent at {os.getcwd()}. Use bash to solve tasks. Act, don't explain."
 
 TOOLS = [{
     'name': 'bash',
@@ -38,6 +40,17 @@ TOOLS = [{
         },
     }
 }]
+
+# 路径安全校验工具：确保所有文件操作都被限制在工作目录内。
+def safe_path(p: str) -> Path:
+    # 1. 将输入路径与工作目录拼接，并转换为绝对路径 (.resolve() 会处理掉路径中的 .. 和 .)
+    path = (WORKDIR / p).resolve()
+    # 2. 检查解析后的绝对路径是否仍以工作目录 (WORKDIR) 开头
+    # 如果不是，说明路径通过 ../ 逃逸到了工作目录之外
+    if not path.is_relative_to(WORKDIR):
+        raise ValueError(f"Path escapes workspace: {p}")
+    # 3. 返回校验合格的安全路径
+    return path
 
 # 定义函数 run_bash，接收一个字符串类型的 command（要执行的命令）
 # 返回值类型为字符串 (-> str)
@@ -58,7 +71,7 @@ def run_bash(command: str) -> str:
         # timeout=120: 设置硬性超时限制为 120 秒，防止命令死循环或阻塞
         r = subprocess.run(command,
                            shell = True,
-                           cwd = os.getcwd(),
+                           cwd = WORKDIR,
                            capture_output = True,
                            text = True,
                            timeout = 120)
@@ -70,6 +83,66 @@ def run_bash(command: str) -> str:
         return out[:50000] if out else '(no output)'
     except subprocess.TimeoutExpired:
         return 'Error: Timeout (120s)'
+
+def run_read(path: str, limit: int = None) -> str:
+    try:
+        # 使用之前定义的 safe_path 确保路径不越权
+        text = safe_path(path).read_text()
+        lines = text.splitlines()
+
+        # 如果设置了行数限制，截断内容并添加提示信息
+        if limit and limit < len(line):
+            lines = lines[:limit] + [f"...({len(lines) - limit} more lines)"]
+        # 拼接行并截取前 50000 个字符（防止返回给 AI 的上下文过长）
+        return "\n".join(lines)[:50000]
+    except Exception as e:
+        return f"Error: {e}"
+
+def run_write(path: str, content: str) -> str:
+    try:
+        fp = safe_path(path)
+        # 自动创建不存在的父级目录（类似于 mkdir -p）
+        fp.parent.mkdir(parents=True, exist_ok=True)
+        # 写入内容
+        fp.write_text(content)
+        return f"Wrote {len(content)} bytes to {path}"
+    except Exception as e:
+        return f"Error: {e}"
+
+# --- 映射工具处理函数 ---
+# TOOL_HANDLERS 是一个字典，将 AI 想要调用的“工具名”映射到实际的 Python 匿名函数（lambda）上。
+TOOL_HANDLERS = {
+    "bash":       lambda **kw: run_bash(kw["command"]),
+    "read_file":  lambda **kw: run_bash(kw["path"], kw.get("limit"),
+    "write_file": lambda **kw: run_bash(kw["path"], kw["content"]),
+    "edit_file":  lambda **kw: run_bash(kw["path"], kw["old_text"], kw["new_text"]),
+}
+
+# --- 定义工具的 JSON Schema ---
+# 这部分数据会发送给 LLM（大模型），告诉模型：工具有哪些、怎么用、参数是什么
+TOOLS = [
+    {
+        "name": "bash",
+        "description": "Run a shell command.",
+        "input_schema": {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]}
+    },
+    {
+        "name": "read_file",
+        "description": "Read file contents."
+        "input_schema": {"type": "object", "properties": {"path": {"type": "string", "limit": "integer"}},"required": ["path"]}
+    },
+    {
+        "name": "write_file",
+        "description": "Write content to file.",
+        "input_schema": {"type": "object", "properties": {"path": {"type": "string", "content": {"type": "string"}}, "required": ["path", "content"]}}
+    },
+    {
+        "name": "edit_file",
+        "description": "Replace exact text in file.",
+        "input_schema": {"type": "object", "properties": {"path": {"type": "string", "old_text": {"type", "string"}, "new_text": {"type": "string"}}, "required": ["path", "old_text", "new_text"]}}
+    },
+]
+
 
 def agent_loop(messages: list):
     while True:
@@ -83,7 +156,7 @@ def agent_loop(messages: list):
         # stop	        str/list 停止符。模型遇到这些字符时会提前停止生成。
         response = client.chat.completions.create(
                         model=MODEL,
-                        messages=[{"role": "system", "content": SYSTEM}] + messages,
+                        messages=[{"role": "system", "content": SYSTEM_PROMPT}] + messages,
                         tools=TOOLS,
                         tool_choice="auto",
                         max_tokens=2048,
@@ -104,16 +177,19 @@ def agent_loop(messages: list):
 
         # 4. 处理工具调用
         for tool_call in msg.tool_calls:
-            # 确认调用的函数名是否为 'bash'
-            if tool_call.function.name == "bash":
-                # 解析参数：模型返回的是 JSON 字符串，需要转成 Python 字典
-                args = json.loads(tool_call.function.arguments)
-                command = args.get("command")
+            function_name = tool_call['function']['name']
+            args = tool_call['function']['arguments']
 
-                # 打印并执行命令
-                print(f"\033[33m$ {command}\033[0m")
-                output = run_bash(command)
-                print(output[:200]) # 预览部分结果
+            # 从之前定义的 TOOL_HANDLERS 中获取对应的执行函数
+            handler = TOOL_HANDLERS.get(function_name)
+
+            if handler:
+                print(f"\n\033[32m[Executing {function_name}...]\033[0m")
+                # 执行函数并获取结果（注意：Ollama 传回的 args 通常已经是 dict）
+                output = handler(**args)
+
+                # 打印预览（前200字符）
+                print(f"Result: {str(output)[:200]}...")
 
                 # 5. 将执行结果反馈给模型
                 # 注意：role 必须是 'tool'，且必须提供 tool_call_id
@@ -123,13 +199,15 @@ def agent_loop(messages: list):
                     "name": "bash",
                     "content": output
                 })
+            else:
+                print(f"Unknown tool: {function_name}")
 
 if __name__ == "__main__":
     history = [] # 存储对话上下文
     while True:
         try:
             # 获取用户输入
-            query = input("\033[36ms01 >> \033[0m")
+            query = input("\033[36ms02 >> \033[0m")
         except (EOFError, KeyboardInterrupt):
             break
         if query.strip().lower() in ("q", "exit", ""):
