@@ -8,7 +8,7 @@ load_dotenv()
 
 API_KEY = os.environ.get("DASHSCOPE_API_KEY")
 BASE_URL = "https://coding.dashscope.aliyuncs.com/v1"
-MODEL = "glm5"
+MODEL = os.environ.get("DASHSCOPE_MODEL", "qwen3.5-plus")
 
 def call_llm(messages, tools=None):
     payload = {

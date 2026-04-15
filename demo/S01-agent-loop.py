@@ -13,9 +13,9 @@ from openai import OpenAI
 load_dotenv()
 
 # 从环境变量中读取，如果读取不到则使用第二个参数作为默认值
-base_url = os.getenv("CHIANLINK_BASE_URL")
-api_key = os.getenv("CHIANLINK_API_KEY")
-MODEL = os.getenv("MODEL_NAME")
+base_url = os.getenv("CHAINLINK_BASE_URL")
+api_key = os.getenv("CHAINLINK_API_KEY")
+MODEL = os.getenv("CHAINLINK_MODEL_NAME")
 
 # 初始化客户端
 client = OpenAI(
