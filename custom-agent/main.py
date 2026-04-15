@@ -1,19 +1,25 @@
-import os
-from llm import LLMClient, QwenClient
+import sys
+from agent import run_agent
 
-# 方式A：使用OpenAI API
-llm = LLMClient(
-    api_key=os.environ["DASHSCOPE_API_KEY"],
-    base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
-    model="qwen-plus",
-)
+sys.stdout.reconfigure(encoding='utf-8')
 
-# 方式 B：原生接口（需要 enable_search 等专属参数时才用）
-llm = QwenClient(
-    api_key=os.environ["DASHSCOPE_API_KEY"],
-    model="qwen-plus",
-    enable_search=True,
-)
-
-# Agent 接受任何有 .chat() 方法的对象，无需改动其他代码
-agent = Agent(llm=llm)
+if __name__ == "__main__":
+    print("开发 Agent 已启动")
+    print("输入任务描述，Agent 将自动完成代码修改、测试等工作")
+    print("输入 'quit' 或 'exit' 退出")
+    print("-" * 50)
+    
+    while True:
+        try:
+            task = input("\n请输入任务: ").strip()
+            if not task:
+                continue
+            if task.lower() in ['quit', 'exit', 'q']:
+                print("再见！")
+                break
+            run_agent(task)
+        except KeyboardInterrupt:
+            print("\n再见！")
+            break
+        except Exception as e:
+            print(f"错误: {e}")
